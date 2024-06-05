@@ -24,9 +24,11 @@ import logging
 import os
 import socketserver
 import threading
+import argparse
 from typing import Callable, List, Optional, Union, Any
 
 from jax._src import traceback_util
+
 traceback_util.register_exclusion(__file__)
 
 from jax._src import xla_bridge
@@ -66,7 +68,7 @@ def stop_server():
   global _profiler_server
   if _profiler_server is None:
     raise ValueError("No active profiler server.")
-  _profiler_server = None # Should destroy the profiler server
+  _profiler_server = None  # Should destroy the profiler server
 
 
 class _ProfileState:
@@ -78,10 +80,10 @@ class _ProfileState:
     self.lock = threading.Lock()
 
   def reset(self):
-    _profile_state.profile_session = None
-    _profile_state.create_perfetto_link = False
-    _profile_state.create_perfetto_trace = False
-    _profile_state.log_dir = None
+    self.profile_session = None
+    self.create_perfetto_link = False
+    self.create_perfetto_trace = False
+    self.log_dir = None
 
 
 _profile_state = _ProfileState()
@@ -127,7 +129,7 @@ def start_trace(log_dir, create_perfetto_link: bool = False,
     _profile_state.profile_session = xla_client.profiler.ProfilerSession()
     _profile_state.create_perfetto_link = create_perfetto_link
     _profile_state.create_perfetto_trace = (
-        create_perfetto_trace or create_perfetto_link)
+      create_perfetto_trace or create_perfetto_link)
     _profile_state.log_dir = log_dir
 
 
@@ -136,7 +138,7 @@ def _write_perfetto_trace_file(log_dir):
   curr_path = os.path.abspath(log_dir)
   root_trace_folder = os.path.join(curr_path, "plugins", "profile")
   trace_folders = [os.path.join(root_trace_folder, trace_folder) for
-      trace_folder in os.listdir(root_trace_folder)]
+                   trace_folder in os.listdir(root_trace_folder)]
   latest_folder = max(trace_folders, key=os.path.getmtime)
   trace_jsons = glob.glob(os.path.join(latest_folder, "*.trace.json.gz"))
   if len(trace_jsons) != 1:
@@ -158,6 +160,7 @@ def _write_perfetto_trace_file(log_dir):
     fp.write(json.dumps(trace).encode("utf-8"))
   return perfetto_trace
 
+
 class _PerfettoServer(http.server.SimpleHTTPRequestHandler):
   """Handles requests from `ui.perfetto.dev` for the `trace.json`"""
 
@@ -171,6 +174,7 @@ class _PerfettoServer(http.server.SimpleHTTPRequestHandler):
 
   def do_POST(self):
     self.send_error(404, "File not found")
+
 
 def _host_perfetto_trace_file(path):
   # ui.perfetto.dev looks for files hosted on `127.0.0.1:9001`. We set up a
@@ -191,6 +195,7 @@ def _host_perfetto_trace_file(path):
         httpd.handle_request()
   finally:
     os.chdir(orig_directory)
+
 
 def stop_trace():
   """Stops the currently-running profiler trace.
@@ -329,11 +334,13 @@ def annotate_function(func: Callable, name: str | None = None,
 
   name = name or getattr(func, '__qualname__', None)
   name = name or func.__name__
+
   @wraps(func)
   def wrapper(*args, **kwargs):
     with TraceAnnotation(name, **decorator_kwargs):
       return func(*args, **kwargs)
     return wrapper
+
   return wrapper
 
 
@@ -382,6 +389,27 @@ def save_device_memory_profile(filename, backend: str | None = None) -> None:
     f.write(profile)
 
 
+def profile_jax_script(script_path: str, profile_output: str,
+                       profile_backend: str = None):
+  """Profiles a JAX script and saves the profile data to the specified output path.
+
+  Args:
+      script_path: Path to the JAX script to profile.
+      profile_output: Output path for the profile data.
+      profile_backend: Optional; the JAX backend to profile.
+  """
+  if profile_output:
+    start_trace(profile_output)
+
+  # Execute the given script
+  exec(open(script_path).read())
+
+  if profile_output:
+    stop_trace()
+    output_filename = f"{profile_output}_memory.prof"
+    save_device_memory_profile(output_filename,
+                               profile_backend)
+
 # Allows to run model with profiler given amount of times. After required amount
 # of retries achived client can collect FDO data.
 class PGLEProfiler:
@@ -402,7 +430,7 @@ class PGLEProfiler:
       return None
 
     self.collected_fdo = xla_client.profiler.aggregate_profiled_instructions(
-        self.fdo_profiles, self.percentile
+      self.fdo_profiles, self.percentile
     )
     return self.collected_fdo
 
@@ -422,7 +450,7 @@ class PGLEProfiler:
   @contextmanager
   def trace(cls, runner: PGLEProfiler | None):
     if (runner is None or runner.is_running()
-        or not runner.is_enabled() or runner.is_fdo_consumed()):
+      or not runner.is_enabled() or runner.is_fdo_consumed()):
       yield
     else:
       options = xla_client.profiler.ProfileOptions()
@@ -434,8 +462,25 @@ class PGLEProfiler:
       finally:
         xspace = runner.current_session.stop()
         runner.fdo_profiles.append(
-            xla_client.profiler.get_fdo_profile(xspace)
+          xla_client.profiler.get_fdo_profile(xspace)
         )
         runner.current_session = None
 
         runner.called_times += 1
+
+
+def run_profiler_from_cli():
+    parser = argparse.ArgumentParser(description="JAX Profiler")
+    parser.add_argument('--profile_output', type=str,
+                        help="Output path for profiling trace")
+    parser.add_argument('--profile_backend', type=str,
+                        help="JAX backend to profile (optional)")
+    parser.add_argument('script', type=str,
+                        help="Path to the JAX script to run")
+
+    args = parser.parse_args()
+    profile_jax_script(args.script, args.profile_output, args.profile_backend)
+
+
+if __name__ == "__main__":
+    run_profiler_from_cli()
